@@ -1,16 +1,47 @@
 from flask import Flask, jsonify, render_template, request
-import pymysql
+import boto3
+from botocore.exceptions import ClientError
 
 app = Flask(__name__)
 
-def get_db_connection():
-    connection = pymysql.connect(host='mydb.cylck8yh5jkc.eu-central-1.rds.amazonaws.com',  # Replace with your RDS endpoint
-                                 user='dbuser',      # Replace with your RDS username
-                                 password='dbpassword',  # Replace with your RDS password
-                                 db='devprojdb',   # Replace with your database name
-                                 charset='utf8mb4',
-                                 cursorclass=pymysql.cursors.DictCursor)
-    return connection
+# Initialize DynamoDB client (configure your AWS credentials via AWS CLI or environment variables)
+dynamodb = boto3.resource('dynamodb', region_name='ca-central-1')  # Canada Central region
+TABLE_NAME = 'ExampleTable'
+
+def create_dynamodb_table():
+    """Create a DynamoDB table if it doesn't exist."""
+    try:
+        # Check if table already exists
+        dynamodb.Table(TABLE_NAME).load()
+        print(f"Table {TABLE_NAME} already exists.")
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'ResourceNotFoundException':
+            # Create table with 'id' as the partition key
+            table = dynamodb.create_table(
+                TableName=TABLE_NAME,
+                KeySchema=[
+                    {
+                        'AttributeName': 'id',
+                        'KeyType': 'HASH'  # Partition key
+                    }
+                ],
+                AttributeDefinitions=[
+                    {
+                        'AttributeName': 'id',
+                        'AttributeType': 'N'  # Number type for id
+                    }
+                ],
+                ProvisionedThroughput={
+                    'ReadCapacityUnits': 5,
+                    'WriteCapacityUnits': 5
+                }
+            )
+            # Wait until the table is created
+            table.wait_until_exists()
+            print(f"Table {TABLE_NAME} created successfully.")
+        else:
+            raise e
+    return dynamodb.Table(TABLE_NAME)
 
 @app.route('/health')
 def health():
@@ -18,38 +49,46 @@ def health():
 
 @app.route('/create_table')
 def create_table():
-    connection = get_db_connection()
-    cursor = connection.cursor()
-    create_table_query = """
-        CREATE TABLE IF NOT EXISTS example_table (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            name VARCHAR(255) NOT NULL
-        )
-    """
-    cursor.execute(create_table_query)
-    connection.commit()
-    connection.close()
-    return "Table created successfully"
+    try:
+        create_dynamodb_table()
+        return "Table created successfully or already exists"
+    except Exception as e:
+        return f"Error creating table: {str(e)}", 500
 
 @app.route('/insert_record', methods=['POST'])
 def insert_record():
-    name = request.json['name']
-    connection = get_db_connection()
-    cursor = connection.cursor()
-    insert_query = "INSERT INTO example_table (name) VALUES (%s)"
-    cursor.execute(insert_query, (name,))
-    connection.commit()
-    connection.close()
-    return "Record inserted successfully"
+    try:
+        name = request.json['name']
+        table = dynamodb.Table(TABLE_NAME)
+        
+        # Generate a unique ID (for simplicity, using a timestamp-based approach)
+        import time
+        item_id = int(time.time() * 1000)  # Milliseconds as a simple unique ID
+        
+        # Insert item into DynamoDB
+        table.put_item(
+            Item={
+                'id': item_id,
+                'name': name
+            }
+        )
+        return "Record inserted successfully"
+    except Exception as e:
+        return f"Error inserting record: {str(e)}", 500
 
 @app.route('/data')
 def data():
-    connection = get_db_connection()
-    cursor = connection.cursor()
-    cursor.execute('SELECT * FROM example_table')
-    result = cursor.fetchall()
-    connection.close()
-    return jsonify(result)
+    try:
+        table = dynamodb.Table(TABLE_NAME)
+        # Scan the table to retrieve all items (Note: Use query for production with indexes)
+        response = table.scan()
+        items = response['Items']
+        # Convert DynamoDB decimal to JSON-serializable format
+        for item in items:
+            item['id'] = int(item['id'])  # Convert Decimal to int
+        return jsonify(items)
+    except Exception as e:
+        return f"Error retrieving data: {str(e)}", 500
 
 # UI route
 @app.route('/')
